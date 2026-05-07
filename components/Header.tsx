@@ -10,7 +10,7 @@ const Header: React.FC = () => (
       Advanced AI Voices
     </div>
     <h1 
-      className="text-5xl md:text-7xl font-display font-extrabold tracking-tight text-white mb-4"
+      className="text-4xl sm:text-5xl md:text-6xl lg:text-7xl font-display font-extrabold tracking-tight text-white mb-4 leading-tight"
     >
       Speak with <span className="text-transparent bg-clip-text bg-gradient-to-r from-violet-400 via-fuchsia-400 to-teal-300">Confidence.</span>
     </h1>

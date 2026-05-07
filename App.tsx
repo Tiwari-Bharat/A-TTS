@@ -110,6 +110,10 @@ const App: React.FC = () => {
   const [translatedText, setTranslatedText] = useState<string>("");
 
   const [generationElapsed, setGenerationElapsed] = useState<number>(0);
+  const [lastGenerationTime, setLastGenerationTime] = useState<number | null>(
+    null,
+  );
+  const [cooldown, setCooldown] = useState<number>(0);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
@@ -138,6 +142,16 @@ const App: React.FC = () => {
     }
     return () => clearInterval(interval);
   }, [isLoading]);
+
+  useEffect(() => {
+    let interval: NodeJS.Timeout;
+    if (cooldown > 0) {
+      interval = setInterval(() => {
+        setCooldown((prev) => Math.max(0, prev - 1));
+      }, 1000);
+    }
+    return () => clearInterval(interval);
+  }, [cooldown]);
 
   useEffect(() => {
     const savedPresets = localStorage.getItem("tts-presets");
@@ -218,6 +232,7 @@ const App: React.FC = () => {
     setAudioBuffer(null);
 
     try {
+      setLastGenerationTime(null);
       let effectPrompt = "";
       if (!isSsml) {
         if (selectedEffect === "auto") {
@@ -248,6 +263,8 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
       setLoadingMessage("");
+      setLastGenerationTime((prev) => generationElapsed);
+      setCooldown(5);
     }
   }, [
     text,
@@ -257,6 +274,7 @@ const App: React.FC = () => {
     isPlaying,
     stop,
     play,
+    generationElapsed,
   ]);
 
   const handleTranslateVoice = useCallback(async () => {
@@ -276,6 +294,7 @@ const App: React.FC = () => {
     setTranslatedText("");
 
     try {
+      setLastGenerationTime(null);
       setLoadingMessage(`Translating to ${targetLanguage}...`);
       // Check if input is likely a URL or mentions a video
       const isUrl =
@@ -304,8 +323,18 @@ const App: React.FC = () => {
     } finally {
       setIsLoading(false);
       setLoadingMessage("");
+      setLastGenerationTime((prev) => generationElapsed);
+      setCooldown(5);
     }
-  }, [text, selectedVoice, targetLanguage, isPlaying, stop, play]);
+  }, [
+    text,
+    selectedVoice,
+    targetLanguage,
+    isPlaying,
+    stop,
+    play,
+    generationElapsed,
+  ]);
 
   const handlePlayPause = useCallback(() => {
     if (!audioBuffer) return;
@@ -448,13 +477,13 @@ const App: React.FC = () => {
   return (
     <div className="min-h-screen flex flex-col font-sans">
       <Navbar />
-      <main className="flex-grow flex flex-col items-center justify-center p-4">
-        <div className="w-full max-w-4xl mx-auto space-y-12">
+      <main className="flex-grow flex flex-col items-center justify-center p-4 sm:p-6 lg:p-8">
+        <div className="w-full max-w-4xl mx-auto space-y-8 sm:space-y-12">
           <Header />
-          <div className="relative bg-slate-900/40 p-1 md:p-1.5 rounded-[2rem] shadow-2xl backdrop-blur-3xl overflow-hidden before:absolute before:inset-0 before:-z-10 before:rounded-[2rem] before:bg-gradient-to-b before:from-white/10 before:to-transparent ring-1 ring-white/10">
+          <div className="relative bg-slate-900/40 p-1 sm:p-1.5 rounded-3xl md:rounded-[2rem] shadow-2xl backdrop-blur-3xl overflow-hidden before:absolute before:inset-0 before:-z-10 before:rounded-3xl before:md:rounded-[2rem] before:bg-gradient-to-b before:from-white/10 before:to-transparent ring-1 ring-white/10">
             {/* Glow effect */}
             <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-fuchsia-400 to-transparent opacity-50"></div>
-            <div className="bg-slate-950/80 rounded-[1.75rem] p-6 md:p-8 relative">
+            <div className="bg-slate-950/80 rounded-[1.6rem] md:rounded-[1.75rem] p-5 sm:p-6 md:p-8 relative">
               <div className="absolute -inset-px rounded-[1.75rem] border border-white/5 pointer-events-none"></div>
 
               <div className="flex bg-slate-900 rounded-xl p-1 mb-8 relative z-10 ring-1 ring-white/5 shadow-inner">
@@ -784,7 +813,7 @@ const App: React.FC = () => {
                       Saves voice, effects & sliders
                     </span>
                   </h3>
-                  <div className="flex gap-3">
+                  <div className="flex flex-col sm:flex-row gap-3">
                     <input
                       type="text"
                       value={presetName}
@@ -796,7 +825,7 @@ const App: React.FC = () => {
                       type="button"
                       onClick={savePreset}
                       disabled={!presetName.trim()}
-                      className="whitespace-nowrap px-6 py-2.5 text-sm !h-auto rounded-xl"
+                      className="whitespace-nowrap px-6 py-3 sm:py-2.5 text-sm !h-auto rounded-xl"
                     >
                       Save Current
                     </Button>
@@ -842,13 +871,23 @@ const App: React.FC = () => {
                         ? `${loadingMessage} (${generationElapsed.toFixed(1)}s)`
                         : loadingMessage
                     }
-                    disabled={isLoading || !text.trim()}
+                    disabled={isLoading || !text.trim() || cooldown > 0}
                     className="w-full"
                   >
-                    {activeTab === "tts"
-                      ? "Generate Speech"
-                      : "Translate & Read"}
+                    {cooldown > 0
+                      ? `Cooldown (${cooldown}s)`
+                      : activeTab === "tts"
+                        ? "Generate Speech"
+                        : "Translate & Read"}
                   </Button>
+                  {lastGenerationTime !== null && !isLoading && !error && (
+                    <div className="text-center text-xs text-slate-500 font-mono animate-fade-in -mt-1 pb-1">
+                      Process completed in{" "}
+                      <span className="text-violet-400">
+                        {lastGenerationTime.toFixed(1)}s
+                      </span>
+                    </div>
+                  )}
                   {audioBuffer && (
                     <div className="bg-slate-900/50 p-6 rounded-2xl border border-slate-700/50 space-y-6 shadow-inner animate-slide-up-fade-in">
                       <ProgressBar
