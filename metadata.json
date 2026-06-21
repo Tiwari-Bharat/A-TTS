@@ -2,5 +2,5 @@
   "name": "Advanced TTS",
   "description": "An advanced Text-to-Speech application that leverages the Gemini API to convert text into high-quality, natural-sounding speech. Users can select from various voices and listen to the generated audio directly in the browser.",
   "requestFramePermissions": [],
-  "majorCapabilities": []
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

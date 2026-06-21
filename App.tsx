@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef, useCallback } from "react";
 import Header from "./components/Header";
 import TextArea from "./components/TextArea";
 import Select from "./components/Select";
+import VoiceSelect from "./components/VoiceSelect";
 import Button from "./components/Button";
 import Navbar from "./components/Navbar";
 import Footer from "./components/Footer";
@@ -19,8 +20,14 @@ import {
   analyzeTextEmotion,
   translateText,
   translateVideoText,
+  generateTranscriptOrSpeech,
 } from "./services/geminiService";
-import { audioBufferToWav, audioBufferToMp3 } from "./services/audioUtils";
+import {
+  audioBufferToWav,
+  audioBufferToMp3,
+  mixAudioBuffers,
+  audioBufferToOgg,
+} from "./services/audioUtils";
 import { useAudioPlayer } from "./hooks/useAudioPlayer";
 
 interface Preset {
@@ -99,7 +106,7 @@ const App: React.FC = () => {
   const [error, setError] = useState<string | null>(null);
   const [audioBuffer, setAudioBuffer] = useState<AudioBuffer | null>(null);
   const [isHotkeysModalOpen, setIsHotkeysModalOpen] = useState(false);
-  const [downloadFormat, setDownloadFormat] = useState<"wav" | "mp3">("wav");
+  const [downloadFormat, setDownloadFormat] = useState<"wav" | "mp3" | "ogg" | "json" | "srt">("wav");
   const [presets, setPresets] = useState<Preset[]>([]);
   const [presetName, setPresetName] = useState<string>("");
   const [isSsml, setIsSsml] = useState<boolean>(false);
@@ -114,9 +121,51 @@ const App: React.FC = () => {
     null,
   );
   const [cooldown, setCooldown] = useState<number>(0);
+  const [bgmFile, setBgmFile] = useState<File | null>(null);
+  const [bgmVolume, setBgmVolume] = useState<number>(0.2);
+  const bgmInputRef = useRef<HTMLInputElement>(null);
+  const transcriptInputRef = useRef<HTMLInputElement>(null);
+  const [playingSampleVoiceId, setPlayingSampleVoiceId] = useState<
+    string | null
+  >(null);
 
   const audioContextRef = useRef<AudioContext | null>(null);
   const textAreaRef = useRef<HTMLTextAreaElement>(null);
+  const transcriptionContainerRef = useRef<HTMLDivElement>(null);
+  const currentWordRef = useRef<HTMLSpanElement>(null);
+
+  const handlePlaySample = async (voiceId: string) => {
+    if (playingSampleVoiceId) return;
+    setPlayingSampleVoiceId(voiceId);
+    try {
+      if (!audioContextRef.current) {
+        audioContextRef.current = new window.AudioContext();
+      }
+      if (audioContextRef.current.state === "suspended") {
+        await audioContextRef.current.resume();
+      }
+
+      const sampleText = "Hi there, I am your selected AI voice.";
+      const buffer = await generateSpeech(
+        sampleText,
+        voiceId,
+        "",
+        audioContextRef.current,
+        false,
+      );
+
+      const source = audioContextRef.current.createBufferSource();
+      source.buffer = buffer;
+      source.connect(audioContextRef.current.destination);
+      source.start();
+      source.onended = () => {
+        setPlayingSampleVoiceId(null);
+      };
+    } catch (e) {
+      console.error(e);
+      setPlayingSampleVoiceId(null);
+    }
+  };
   const {
     play,
     stop,
@@ -204,6 +253,21 @@ const App: React.FC = () => {
     localStorage.setItem("tts-presets", JSON.stringify(updatedPresets));
   };
 
+  const handleTranscriptUpload = (event: React.ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      const content = e.target?.result as string;
+      setText(content);
+    };
+    reader.readAsText(file);
+    if (transcriptInputRef.current) {
+        transcriptInputRef.current.value = "";
+    }
+  };
+
   useEffect(() => {
     if (!audioContextRef.current) {
       try {
@@ -246,13 +310,31 @@ const App: React.FC = () => {
       }
 
       setLoadingMessage("Generating speech...");
-      const buffer = await generateSpeech(
+      let buffer = await generateTranscriptOrSpeech(
         text,
         selectedVoice,
         effectPrompt,
         audioContextRef.current,
         isSsml,
       );
+
+      if (bgmFile && audioContextRef.current) {
+        setLoadingMessage("Mixing background music...");
+        const arrayBuffer = await bgmFile.arrayBuffer();
+        const bgmBuffer =
+          await audioContextRef.current.decodeAudioData(arrayBuffer);
+        const mixed = await mixAudioBuffers(
+          buffer,
+          bgmBuffer,
+          audioContextRef.current,
+          1.0,
+          bgmVolume,
+        );
+        if (mixed) {
+          buffer = mixed;
+        }
+      }
+
       setAudioBuffer(buffer);
       play(buffer); // Autoplay
     } catch (err) {
@@ -306,13 +388,31 @@ const App: React.FC = () => {
       setTranslatedText(translated);
 
       setLoadingMessage("Generating speech...");
-      const buffer = await generateSpeech(
+      let buffer = await generateTranscriptOrSpeech(
         translated,
         selectedVoice,
         "",
         audioContextRef.current,
         false,
       );
+
+      if (bgmFile && audioContextRef.current) {
+        setLoadingMessage("Mixing background music...");
+        const arrayBuffer = await bgmFile.arrayBuffer();
+        const bgmBuffer =
+          await audioContextRef.current.decodeAudioData(arrayBuffer);
+        const mixed = await mixAudioBuffers(
+          buffer,
+          bgmBuffer,
+          audioContextRef.current,
+          1.0,
+          bgmVolume,
+        );
+        if (mixed) {
+          buffer = mixed;
+        }
+      }
+
       setAudioBuffer(buffer);
       play(buffer);
     } catch (err) {
@@ -354,13 +454,64 @@ const App: React.FC = () => {
     }
   }, [audioBuffer, play, stop]);
 
-  const handleDownload = useCallback(() => {
+  useEffect(() => {
+    if (currentWordRef.current && transcriptionContainerRef.current && isPlaying) {
+      const container = transcriptionContainerRef.current;
+      const word = currentWordRef.current;
+      
+      const offset = word.offsetTop - (container.clientHeight / 2) + (word.clientHeight / 2);
+      container.scrollTo({ top: Math.max(0, offset), behavior: "smooth" });
+    }
+  }, [currentTime, isPlaying]);
+
+  const handleDownload = useCallback(async () => {
     if (!audioBuffer) return;
     try {
-      const blob =
-        downloadFormat === "wav"
-          ? audioBufferToWav(audioBuffer)
-          : audioBufferToMp3(audioBuffer);
+      let blob;
+      if (downloadFormat === "json" || downloadFormat === "srt") {
+          const sourceText = activeTab === "tts" ? text : translatedText;
+          const cleanText = isSsml && activeTab === "tts" ? sourceText.replace(/<[^>]+>/g, "") : sourceText;
+          const words = cleanText.split(/(\s+)/);
+          const nonSpaceWords = cleanText.match(/\S+/g) || [];
+          const timeline = [];
+          
+          let startTime = 0;
+          const timePerWord = duration > 0 ? duration / nonSpaceWords.length : 0;
+          for (const word of words) {
+            if (/\s+/.test(word)) continue;
+            timeline.push({
+               word,
+               startTime: parseFloat(startTime.toFixed(3)),
+               endTime: parseFloat((startTime + timePerWord).toFixed(3))
+            });
+            startTime += timePerWord;
+          }
+          
+          if (downloadFormat === "json") {
+             blob = new Blob([JSON.stringify({ timeline }, null, 2)], { type: "application/json" });
+          } else {
+             let srtContent = "";
+             let counter = 1;
+             const formatTime = (secs: number) => {
+               const h = Math.floor(secs / 3600);
+               const m = Math.floor((secs % 3600) / 60);
+               const s = Math.floor(secs % 60);
+               const ms = Math.floor((secs % 1) * 1000);
+               return `${h.toString().padStart(2, '0')}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')},${ms.toString().padStart(3, '0')}`;
+             };
+             for (const item of timeline) {
+                srtContent += `${counter}\n${formatTime(item.startTime)} --> ${formatTime(item.endTime)}\n${item.word}\n\n`;
+                counter++;
+             }
+             blob = new Blob([srtContent], { type: "text/srt" });
+          }
+      } else if (downloadFormat === "ogg") {
+        blob = await audioBufferToOgg(audioBuffer);
+      } else if (downloadFormat === "wav") {
+        blob = audioBufferToWav(audioBuffer);
+      } else {
+        blob = audioBufferToMp3(audioBuffer);
+      }
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
       a.href = url;
@@ -372,7 +523,7 @@ const App: React.FC = () => {
     } catch (err) {
       setError("Failed to prepare audio for download.");
     }
-  }, [audioBuffer, downloadFormat]);
+  }, [audioBuffer, downloadFormat, text, translatedText, isSsml, activeTab, duration]);
 
   const handleKeyDown = useCallback(
     (event: KeyboardEvent) => {
@@ -480,13 +631,13 @@ const App: React.FC = () => {
       <main className="flex-grow flex flex-col items-center justify-center p-4 sm:p-6 lg:p-8">
         <div className="w-full max-w-4xl mx-auto space-y-8 sm:space-y-12">
           <Header />
-          <div className="relative bg-slate-900/40 p-1 sm:p-1.5 rounded-3xl md:rounded-[2rem] shadow-2xl backdrop-blur-3xl overflow-hidden before:absolute before:inset-0 before:-z-10 before:rounded-3xl before:md:rounded-[2rem] before:bg-gradient-to-b before:from-white/10 before:to-transparent ring-1 ring-white/10">
+          <div className="relative bg-slate-900/40 p-1 sm:p-2 rounded-3xl md:rounded-[2rem] shadow-2xl backdrop-blur-3xl overflow-hidden before:absolute before:inset-0 before:-z-10 before:rounded-3xl before:md:rounded-[2rem] before:bg-gradient-to-b before:from-white/5 before:to-transparent ring-1 ring-white/10">
             {/* Glow effect */}
-            <div className="absolute top-0 inset-x-0 h-[2px] bg-gradient-to-r from-transparent via-fuchsia-400 to-transparent opacity-50"></div>
-            <div className="bg-slate-950/80 rounded-[1.6rem] md:rounded-[1.75rem] p-5 sm:p-6 md:p-8 relative">
+            <div className="absolute top-0 inset-x-0 h-[1px] bg-gradient-to-r from-transparent via-violet-400 to-transparent opacity-40"></div>
+            <div className="bg-slate-950/90 rounded-[1.4rem] md:rounded-[1.75rem] p-5 sm:p-8 md:p-10 relative shadow-inner">
               <div className="absolute -inset-px rounded-[1.75rem] border border-white/5 pointer-events-none"></div>
 
-              <div className="flex bg-slate-900 rounded-xl p-1 mb-8 relative z-10 ring-1 ring-white/5 shadow-inner">
+              <div className="flex bg-slate-900 rounded-xl p-1 mb-8 relative z-10 ring-1 ring-white/10 shadow-inner">
                 <button
                   type="button"
                   className={`flex-1 py-3 px-4 text-sm font-semibold rounded-lg transition-all duration-300 ${activeTab === "tts" ? "bg-slate-800 text-violet-400 shadow-md ring-1 ring-white/10" : "text-slate-400 hover:text-slate-200 hover:bg-slate-800/50"}`}
@@ -516,12 +667,28 @@ const App: React.FC = () => {
                   <>
                     <div className="flex flex-col gap-1">
                       <div className="flex justify-between items-center mb-1">
-                        <label
-                          htmlFor="tts-text"
-                          className="block text-sm font-medium text-slate-300"
-                        >
-                          Your Text
-                        </label>
+                        <div className="flex items-center gap-3">
+                          <label
+                            htmlFor="tts-text"
+                            className="block text-sm font-medium text-slate-300"
+                          >
+                            Your Text
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => transcriptInputRef.current?.click()}
+                            className="px-2.5 py-1 text-xs font-semibold bg-slate-800 rounded-md text-slate-300 hover:text-white hover:bg-slate-700 shadow shadow-black/20 transition-all border border-slate-700"
+                          >
+                            Import Transcript
+                          </button>
+                          <input
+                            type="file"
+                            ref={transcriptInputRef}
+                            className="hidden"
+                            accept=".txt,.srt,.md"
+                            onChange={handleTranscriptUpload}
+                          />
+                        </div>
                         <label className="flex items-center gap-2 cursor-pointer text-sm text-slate-300 font-medium">
                           <input
                             type="checkbox"
@@ -600,7 +767,7 @@ const App: React.FC = () => {
                         placeholder={
                           isSsml
                             ? "Enter SSML tags here..."
-                            : "Enter text to convert to speech..."
+                            : "Enter text (or transcript with timestamps e.g. [00:00.00] text) to convert to speech..."
                         }
                         rows={8}
                       />
@@ -608,12 +775,13 @@ const App: React.FC = () => {
 
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <div>
-                        <Select
+                        <VoiceSelect
                           label="Select a Voice"
-                          id="voice-select"
                           value={selectedVoice}
                           onChange={(e) => setSelectedVoice(e.target.value)}
                           options={AVAILABLE_VOICES}
+                          onPlaySample={handlePlaySample}
+                          playingSampleVoiceId={playingSampleVoiceId}
                         />
                         {selectedVoiceDetails && (
                           <p className="mt-2 text-sm text-slate-400 px-1">
@@ -651,15 +819,34 @@ const App: React.FC = () => {
                   </>
                 ) : (
                   <>
-                    <TextArea
-                      ref={textAreaRef}
-                      label="Original Text or Video URL"
-                      id="translator-text"
-                      value={text}
-                      onChange={(e) => setText(e.target.value)}
-                      placeholder="Enter English text or paste a video link to translate..."
-                      rows={5}
-                    />
+                    <div className="flex flex-col gap-1 mb-6">
+                      <div className="flex justify-between items-center mb-1">
+                        <div className="flex items-center gap-3">
+                          <label
+                            htmlFor="translator-text"
+                            className="block text-sm font-medium text-slate-300"
+                          >
+                            Original Text, Video URL, or Transcript
+                          </label>
+                          <button
+                            type="button"
+                            onClick={() => transcriptInputRef.current?.click()}
+                            className="px-2.5 py-1 text-xs font-semibold bg-slate-800 rounded-md text-slate-300 hover:text-white hover:bg-slate-700 shadow shadow-black/20 transition-all border border-slate-700"
+                          >
+                            Import Transcript
+                          </button>
+                        </div>
+                      </div>
+                      <TextArea
+                        ref={textAreaRef}
+                        label=""
+                        id="translator-text"
+                        value={text}
+                        onChange={(e) => setText(e.target.value)}
+                        placeholder="Enter transcript with timestamps (e.g. [00:00.00] text), paste a video link, or general text..."
+                        rows={5}
+                      />
+                    </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
                       <Select
                         label="Target Language"
@@ -669,12 +856,13 @@ const App: React.FC = () => {
                         options={TARGET_LANGUAGES}
                       />
                       <div>
-                        <Select
+                        <VoiceSelect
                           label="Select a Voice"
-                          id="voice-select-translate"
                           value={selectedVoice}
                           onChange={(e) => setSelectedVoice(e.target.value)}
                           options={AVAILABLE_VOICES}
+                          onPlaySample={handlePlaySample}
+                          playingSampleVoiceId={playingSampleVoiceId}
                         />
                         {selectedVoiceDetails && (
                           <p className="mt-2 text-sm text-slate-400 px-1">
@@ -684,7 +872,7 @@ const App: React.FC = () => {
                       </div>
                     </div>
                     {translatedText && (
-                      <div className="p-5 bg-slate-900 border border-slate-700/60 rounded-xl animate-fade-in relative group shadow-inner">
+                      <div className="p-6 bg-slate-900/40 backdrop-blur-sm border border-slate-700/50 rounded-2xl animate-fade-in relative group shadow-inner">
                         <div className="flex items-center justify-between mb-3 border-b border-white/5 pb-2">
                           <h3 className="text-sm font-semibold text-slate-300 drop-shadow-sm tracking-wide">
                             Translated Text ({targetLanguage}):
@@ -719,7 +907,7 @@ const App: React.FC = () => {
                   </>
                 )}
 
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-900/50 p-5 rounded-2xl border border-slate-700/50">
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-6 bg-slate-900/30 backdrop-blur-sm p-6 rounded-2xl border border-slate-700/40 shadow-sm">
                   <div className="space-y-3">
                     <label className="block text-sm font-medium text-slate-300 flex justify-between tracking-wide">
                       <span className="flex items-center gap-2">
@@ -790,7 +978,96 @@ const App: React.FC = () => {
                   </div>
                 </div>
 
-                <div className="bg-slate-900/40 p-5 rounded-2xl border border-slate-700/50 space-y-4">
+                <div className="bg-slate-900/30 backdrop-blur-sm p-6 rounded-2xl border border-slate-700/40 space-y-4 shadow-sm">
+                  <h3 className="text-sm font-semibold text-slate-200 flex items-center justify-between tracking-wide">
+                    <span className="flex items-center gap-2">
+                      <svg
+                        xmlns="http://www.w3.org/2000/svg"
+                        fill="none"
+                        viewBox="0 0 24 24"
+                        strokeWidth={1.5}
+                        stroke="currentColor"
+                        className="w-5 h-5 text-violet-400"
+                      >
+                        <path
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
+                          d="M9 19.5V15m6 4.5v-4.5M9 15l3-3 3 3M6 19.5v-4.5M18 19.5v-4.5M3 15v4.5A2.25 2.25 0 005.25 21h13.5A2.25 2.25 0 0021 19.5V15M3 15V5.25A2.25 2.25 0 015.25 3h13.5A2.25 2.25 0 0121 5.25V15"
+                        />
+                      </svg>
+                      Background Music (Optional)
+                    </span>
+                  </h3>
+                  <div className="flex flex-col sm:flex-row gap-4 items-center">
+                    <div className="w-full flex items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={() => bgmInputRef.current?.click()}
+                        className="px-4 py-2 bg-slate-800 hover:bg-slate-700 border border-slate-600 rounded-lg text-sm text-slate-200 shadow-sm transition-colors whitespace-nowrap"
+                      >
+                        {bgmFile ? "Change File" : "Choose Audio File"}
+                      </button>
+                      <input
+                        type="file"
+                        accept="audio/*"
+                        ref={bgmInputRef}
+                        onChange={(e) => {
+                          if (e.target.files && e.target.files.length > 0) {
+                            setBgmFile(e.target.files[0]);
+                          }
+                        }}
+                        className="hidden"
+                      />
+                      <span className="text-sm text-slate-400 truncate flex-grow">
+                        {bgmFile ? bgmFile.name : "No file selected"}
+                      </span>
+                      {bgmFile && (
+                        <button
+                          type="button"
+                          onClick={() => setBgmFile(null)}
+                          className="text-slate-500 hover:text-red-400"
+                          title="Remove BGM"
+                        >
+                          <svg
+                            xmlns="http://www.w3.org/2000/svg"
+                            className="h-5 w-5"
+                            viewBox="0 0 20 20"
+                            fill="currentColor"
+                          >
+                            <path
+                              fillRule="evenodd"
+                              d="M4.293 4.293a1 1 0 011.414 0L10 8.586l4.293-4.293a1 1 0 111.414 1.414L11.414 10l4.293 4.293a1 1 0 01-1.414 1.414L10 11.414l-4.293 4.293a1 1 0 01-1.414-1.414L8.586 10 4.293 5.707a1 1 0 010-1.414z"
+                              clipRule="evenodd"
+                            />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                    {bgmFile && (
+                      <div className="w-full sm:w-1/2 flex items-center gap-3">
+                        <span className="text-xs text-slate-400 font-medium whitespace-nowrap">
+                          Volume
+                        </span>
+                        <input
+                          type="range"
+                          min="0"
+                          max="1"
+                          step="0.05"
+                          value={bgmVolume}
+                          onChange={(e) =>
+                            setBgmVolume(parseFloat(e.target.value))
+                          }
+                          className="w-full h-2 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-violet-500 hover:accent-violet-400 focus:outline-none focus:ring-2 focus:ring-violet-500/50 transition-all shadow-inner"
+                        />
+                        <span className="text-violet-400 font-mono text-xs w-8 text-right">
+                          {Math.round(bgmVolume * 100)}%
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                </div>
+
+                <div className="bg-slate-900/30 backdrop-blur-sm p-6 rounded-2xl border border-slate-700/40 space-y-4 shadow-sm">
                   <h3 className="text-sm font-semibold text-slate-200 flex items-center justify-between tracking-wide">
                     <span className="flex items-center gap-2">
                       <svg
@@ -949,9 +1226,39 @@ const App: React.FC = () => {
                                 setDownloadFormat("mp3");
                                 handleDownload();
                               }}
-                              className={`px-4 py-2 text-sm font-bold rounded-r-xl transition-all border-l border-slate-700/50 ${downloadFormat === "mp3" ? "bg-violet-500 text-white shadow-md" : "text-slate-400 hover:text-slate-200"}`}
+                              className={`px-4 py-2 text-sm font-bold transition-all border-l border-slate-700/50 ${downloadFormat === "mp3" ? "bg-violet-500 text-white shadow-md" : "text-slate-400 hover:text-slate-200"}`}
                             >
                               MP3
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDownloadFormat("ogg");
+                                handleDownload();
+                              }}
+                              className={`px-4 py-2 text-sm font-bold transition-all border-l border-slate-700/50 ${downloadFormat === "ogg" ? "bg-violet-500 text-white shadow-md" : "text-slate-400 hover:text-slate-200"}`}
+                            >
+                              OGG
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDownloadFormat("json");
+                                handleDownload();
+                              }}
+                              className={`px-4 py-2 text-sm font-bold transition-all border-l border-slate-700/50 ${downloadFormat === "json" ? "bg-violet-500 text-white shadow-md" : "text-slate-400 hover:text-slate-200"}`}
+                            >
+                              JSON
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setDownloadFormat("srt");
+                                handleDownload();
+                              }}
+                              className={`px-4 py-2 text-sm font-bold rounded-r-xl transition-all border-l border-slate-700/50 ${downloadFormat === "srt" ? "bg-violet-500 text-white shadow-md" : "text-slate-400 hover:text-slate-200"}`}
+                            >
+                              SRT
                             </button>
                           </div>
                         </div>
@@ -959,7 +1266,7 @@ const App: React.FC = () => {
                     </div>
                   )}
                   {audioBuffer && (
-                    <div className="mt-4 p-5 bg-slate-900/40 border border-slate-700/30 rounded-2xl animate-slide-up-fade-in">
+                    <div className="mt-4 p-6 bg-slate-900/30 backdrop-blur-sm border border-slate-700/40 rounded-2xl animate-slide-up-fade-in shadow-sm">
                       <h3 className="text-sm font-semibold text-slate-300 mb-4 flex items-center gap-2 tracking-wide uppercase">
                         <svg
                           xmlns="http://www.w3.org/2000/svg"
@@ -977,7 +1284,7 @@ const App: React.FC = () => {
                         </svg>
                         Real-time Transcription
                       </h3>
-                      <div className="text-slate-300 leading-relaxed max-h-40 overflow-y-auto pr-2 custom-scrollbar text-lg font-medium">
+                      <div ref={transcriptionContainerRef} className="text-slate-300 leading-relaxed max-h-40 overflow-y-auto pr-2 custom-scrollbar text-lg font-medium relative scroll-smooth">
                         {(() => {
                           const sourceText =
                             activeTab === "tts" ? text : translatedText;
@@ -1009,6 +1316,7 @@ const App: React.FC = () => {
                               return (
                                 <span
                                   key={i}
+                                  ref={currentWordRef}
                                   className="text-white font-bold bg-violet-500/30 px-1 py-0.5 rounded shadow-[0_0_10px_theme(colors.violet.500/50%)] transition-all duration-200"
                                 >
                                   {word}

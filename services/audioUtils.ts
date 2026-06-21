@@ -33,7 +33,86 @@ export async function decodeAudioData(
 }
 
 
-// Converts an AudioBuffer to a WAV file Blob.
+export async function assembleAudioTrack(
+  segments: { buffer: AudioBuffer, startTime: number }[],
+  ctx: AudioContext
+): Promise<AudioBuffer | null> {
+  if (segments.length === 0) return null;
+
+  // Let's assume all buffers have same sample rate (ctx.sampleRate) and 1 or 2 channels.
+  let channels = 1;
+  let sampleRate = ctx.sampleRate;
+  
+  // Find longest time
+  let maxTimeSeconds = 0;
+  for (const seg of segments) {
+    channels = Math.max(channels, seg.buffer.numberOfChannels);
+    if (seg.buffer.sampleRate !== sampleRate) {
+       sampleRate = seg.buffer.sampleRate; // just use the last one seen, usually 24000
+    }
+    const endTime = seg.startTime + seg.buffer.duration;
+    if (endTime > maxTimeSeconds) {
+      maxTimeSeconds = endTime;
+    }
+  }
+
+  const length = Math.ceil(maxTimeSeconds * sampleRate);
+  if (length === 0) return null;
+
+  const mixedBuffer = ctx.createBuffer(channels, length, sampleRate);
+
+  for (const seg of segments) {
+    const startSample = Math.floor(seg.startTime * sampleRate);
+    for (let ch = 0; ch < channels; ch++) {
+      const mixedData = mixedBuffer.getChannelData(ch);
+      const chData = ch < seg.buffer.numberOfChannels ? seg.buffer.getChannelData(ch) : seg.buffer.getChannelData(0);
+      for (let i = 0; i < chData.length; i++) {
+        if (startSample + i < length) {
+           // mix by adding
+           mixedData[startSample + i] += chData[i];
+        }
+      }
+    }
+  }
+
+  return mixedBuffer;
+}
+
+export async function mixAudioBuffers(
+  buffer1: AudioBuffer | null,
+  buffer2: AudioBuffer | null,
+  ctx: AudioContext,
+  volume1: number = 1.0,
+  volume2: number = 1.0
+): Promise<AudioBuffer | null> {
+  if (!buffer1 && !buffer2) return null;
+  if (!buffer1) return buffer2;
+  if (!buffer2) return buffer1;
+
+  const length = Math.max(buffer1.length, buffer2.length);
+  const sampleRate = Math.max(buffer1.sampleRate, buffer2.sampleRate);
+  const channels = Math.max(buffer1.numberOfChannels, buffer2.numberOfChannels);
+
+  // For simplicity, assuming both are at the same sample rate 
+  // (WebAudio automatically handles different rates when decoding, but if manually generated they should match context rate)
+  
+  const mixedBuffer = ctx.createBuffer(channels, length, sampleRate);
+
+  for (let ch = 0; ch < channels; ch++) {
+    const mixedData = mixedBuffer.getChannelData(ch);
+    
+    const chData1 = ch < buffer1.numberOfChannels ? buffer1.getChannelData(ch) : buffer1.getChannelData(0);
+    const chData2 = ch < buffer2.numberOfChannels ? buffer2.getChannelData(ch) : buffer2.getChannelData(0);
+
+    for (let i = 0; i < length; i++) {
+      const s1 = i < chData1.length ? chData1[i] * volume1 : 0;
+      const s2 = i < chData2.length ? chData2[i] * volume2 : 0;
+      mixedData[i] = s1 + s2;
+    }
+  }
+
+  return mixedBuffer;
+}
 export function audioBufferToWav(buffer: AudioBuffer): Blob {
   const numOfChan = buffer.numberOfChannels;
   const aLength = buffer.length;
@@ -82,6 +161,40 @@ export function audioBufferToWav(buffer: AudioBuffer): Blob {
   }
 
   return new Blob([view], { type: 'audio/wav' });
+}
+
+export async function audioBufferToOgg(audioBuffer: AudioBuffer): Promise<Blob> {
+  const encodeOgg = (await import('@audio/encode-ogg')).default;
+  const sampleRate = audioBuffer.sampleRate;
+  const channels = audioBuffer.numberOfChannels;
+  
+  const enc = await encodeOgg({ sampleRate, channels, quality: 5 });
+  
+  const chunks: any[] = [];
+  
+  const length = audioBuffer.length;
+  // encode in chunks to avoid memory spikes
+  const chunkSize = 4096;
+  const channelData = [];
+  for (let ch = 0; ch < channels; ch++) {
+    channelData.push(audioBuffer.getChannelData(ch));
+  }
+  
+  for (let i = 0; i < length; i += chunkSize) {
+    const chunkLength = Math.min(chunkSize, length - i);
+    const chunkArrays = [];
+    for (let ch = 0; ch < channels; ch++) {
+      chunkArrays.push(channelData[ch].subarray(i, i + chunkLength));
+    }
+    const oggData = enc.encode(chunkArrays);
+    if (oggData.length > 0) chunks.push(oggData);
+  }
+  
+  const finalOggData = enc.flush();
+  if (finalOggData.length > 0) chunks.push(finalOggData);
+  
+  enc.free();
+  return new Blob(chunks, { type: 'audio/ogg' });
 }
 
 // Converts an AudioBuffer to an MP3 file Blob using LameJS.

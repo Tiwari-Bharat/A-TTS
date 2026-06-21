@@ -5,7 +5,7 @@ export const AVAILABLE_VOICES: VoiceOption[] = [
   { value: 'Puck', label: 'Puck (Male, Warm)', description: 'A warm and friendly male voice, perfect for conversational content.' },
   { value: 'Charon', label: 'Charon (Male, Deep)', description: 'A deep, authoritative male voice, suitable for serious topics.' },
   { value: 'Fenrir', label: 'Fenrir (Female, Crisp)', description: 'A crisp, energetic female voice that captures attention.' },
-  { value: 'Aoede', label: 'Aoede (Female, Gentle)', description: 'A gentle and soothing female voice, ideal for calming content.' }
+  { value: 'Zephyr', label: 'Zephyr (Female, Gentle)', description: 'A gentle and soothing female voice, ideal for calming content.' }
 ];
 
 export const SOUND_EFFECTS: VoiceOption[] = [
